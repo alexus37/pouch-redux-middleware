@@ -1,3 +1,5 @@
+'use strict';
+
 var jPath = require('json-path');
 var Queue = require('async-function-queue');
 var extend = require('xtend');
@@ -7,6 +9,9 @@ module.exports = createPouchMiddleware;
 
 function createPouchMiddleware(_paths) {
   var paths = _paths || [];
+  var loggedIn = false;
+  var init = false;
+
   if (!Array.isArray(paths)) {
     paths = [paths];
   }
@@ -19,10 +24,12 @@ function createPouchMiddleware(_paths) {
     path: '.',
     remove: scheduleRemove,
     insert: scheduleInsert,
-    propagateDelete,
-    propagateUpdate,
-    propagateInsert,
-    handleResponse: function(err, data, cb) { cb(err); },
+    propagateDelete: propagateDelete,
+    propagateUpdate: propagateUpdate,
+    propagateInsert: propagateInsert,
+    handleResponse: function handleResponse(err, data, cb) {
+      cb(err);
+    },
     queue: Queue(1),
     docs: {},
     actions: {
@@ -30,91 +37,76 @@ function createPouchMiddleware(_paths) {
       update: defaultAction('update'),
       insert: defaultAction('insert')
     }
-  }
+  };
 
-  paths = paths.map(function(path) {
+  paths = paths.map(function (path) {
     var spec = extend({}, defaultSpec, path);
     spec.actions = extend({}, defaultSpec.actions, spec.actions);
     spec.docs = {};
 
-    if (! spec.db) {
+    if (!spec.db) {
       throw new Error('path ' + path.path + ' needs a db');
     }
     return spec;
   });
 
-  function listen(path, dispatch, initialBatchDispatched) {
-    path.db.info().then((info) => {
-      if (info.update_seq === 0) {
-        initialBatchDispatched();
-      }
-
-      const changes = path.db.changes({
-        live: true,
-        include_docs: true
-      });
-      changes.on('change', change => {
-        onDbChange(path, change, dispatch);
-        if (change.seq === info.update_seq) {
-          initialBatchDispatched();
-        }
-      });
+  function listen(path, dispatch) {
+    var changes = path.db.changes({ live: true, include_docs: true });
+    init = true;
+    changes.on('change', function (change) {
+      return onDbChange(path, change, dispatch, loggedIn);
     });
+    return changes;
   }
+
 
   function processNewStateForPath(path, state) {
     var docs = jPath.resolve(state, path.path);
 
     /* istanbul ignore else */
     if (docs && docs.length) {
-      docs.forEach(function(docs) {
+      docs.forEach(function (docs) {
         var diffs = differences(path.docs, docs);
-        diffs.new.concat(diffs.updated).forEach(doc => path.insert(doc))
-        diffs.deleted.forEach(doc => path.remove(doc));
+        diffs.new.concat(diffs.updated).forEach(function (doc) {
+          return path.insert(doc);
+        });
+        diffs.deleted.forEach(function (doc) {
+          return path.remove(doc);
+        });
       });
     }
   }
 
   function write(data, responseHandler) {
-    return function(done) {
-      data.db[data.type](data.doc, function(err, resp) {
-        responseHandler(
-          err,
-          {
-            response: resp,
-            doc: data.doc,
-            type: data.type
-          },
-          function(err2) {
-            done(err2, resp);
-          }
-        );
+    return function (done) {
+      data.db[data.type](data.doc, function (err, resp) {
+        responseHandler(err, {
+          response: resp,
+          doc: data.doc,
+          type: data.type
+        }, function (err2) {
+          done(err2, resp);
+        });
       });
     };
   }
 
   function scheduleInsert(doc) {
     this.docs[doc._id] = doc;
-    this.queue.push(write(
-      {
-        type: 'put',
-        doc: doc,
-        db: this.db
-      },
-      this.handleResponse
-    ));
+    this.queue.push(write({
+      type: 'put',
+      doc: doc,
+      db: this.db
+    }, this.handleResponse));
   }
 
   function scheduleRemove(doc) {
     delete this.docs[doc._id];
-    this.queue.push(write(
-      {
-        type: 'remove',
-        doc: doc,
-        db: this.db
-      },
-      this.handleResponse
-    ));
+    this.queue.push(write({
+      type: 'remove',
+      doc: doc,
+      db: this.db
+    }, this.handleResponse));
   }
 
   function propagateDelete(doc, dispatch) {
@@ -129,45 +121,64 @@ function createPouchMiddleware(_paths) {
     dispatch(this.actions.update(doc));
   }
 
-  return function(options) {
-    paths.forEach((path) => {
-      listen(path, options.dispatch, (err) => {
-        if (path.initialBatchDispatched) {
-          path.initialBatchDispatched(err);
+  return function (options) {
+    
+    return function (next) {
+      return function (action) {
+        // start to listen after login event
+        // TODO make login not hardcoded
+        if(action.type == "LOGIN") {
+            loggedIn = true;
+            paths.forEach(function (path) {
+                listen(path, options.dispatch);
+            });
         }
-      });
-    });
+        if(action.type == "LOGOUT") {
+            loggedIn = false;
+        }
+        if(action.type == "SESSIONACTIVE") {
+            if(!init) {
+                paths.forEach(function (path) {
+                    listen(path, options.dispatch);
+                });
+            }
+        }
 
-    return function(next) {
-      return function(action) {
+
         var returnValue = next(action);
         var newState = options.getState();
 
-        paths.forEach(path => processNewStateForPath(path, newState));
+        paths.forEach(function (path) {
+          return processNewStateForPath(path, newState);
+        });
 
         return returnValue;
-      }
-    }
-  }
+      };
+    };
+  };
 }
 
 function differences(oldDocs, newDocs) {
   var result = {
     new: [],
     updated: [],
-    deleted: Object.keys(oldDocs).map(oldDocId => oldDocs[oldDocId]),
+    deleted: Object.keys(oldDocs).map(function (oldDocId) {
+      return oldDocs[oldDocId];
+    })
   };
 
-  newDocs.forEach(function(newDoc) {
+  newDocs.forEach(function (newDoc) {
     var id = newDoc._id;
 
     /* istanbul ignore next */
-    if (! id) {
+    if (!id) {
       warn('doc with no id');
     }
-    result.deleted = result.deleted.filter(doc => doc._id !== id);
+    result.deleted = result.deleted.filter(function (doc) {
+      return doc._id !== id;
+    });
     var oldDoc = oldDocs[id];
-    if (! oldDoc) {
+    if (!oldDoc) {
       result.new.push(newDoc);
     } else if (!equal(oldDoc, newDoc)) {
       result.updated.push(newDoc);
@@ -177,10 +188,12 @@ function differences(oldDocs, newDocs) {
   return result;
 }
 
-function onDbChange(path, change, dispatch) {
+function onDbChange(path, change, dispatch, loggedIn) {
   var changeDoc = change.doc;
 
-  if(path.changeFilter && (! path.changeFilter(changeDoc))) {
+  if(!loggedIn) return;
+
+  if (path.changeFilter && !path.changeFilter(changeDoc)) {
     return;
   }
 
@@ -210,7 +223,7 @@ function warn(what) {
 
 /* istanbul ignore next */
 function defaultAction(action) {
-  return function() {
+  return function () {
     throw new Error('no action provided for ' + action);
   };
 }
