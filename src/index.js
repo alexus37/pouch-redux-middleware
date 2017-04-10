@@ -56,7 +56,13 @@ function createPouchMiddleware(_paths) {
     init = true;
     changes.on('change', function (change) {
       return onDbChange(path, change, dispatch, loggedIn);
+    })
+    .on('complete', function(info) {
+      warn('changes() was canceled' + info);
+    }).on('error', function (err) {
+      warn(err);
     });
+
     return changes;
   }
 
