@@ -51,7 +51,8 @@ function createPouchMiddleware(_paths) {
   });
 
   function listen(path, dispatch) {
-    var changes = path.db.changes({ live: true, include_docs: true });
+    // timeout in ~3 hours
+    var changes = path.db.changes({ live: true, include_docs: true, timeout: 10000000 });
     init = true;
     changes.on('change', function (change) {
       return onDbChange(path, change, dispatch, loggedIn);
@@ -122,7 +123,7 @@ function createPouchMiddleware(_paths) {
   }
 
   return function (options) {
-    
+
     return function (next) {
       return function (action) {
         // start to listen after login event
